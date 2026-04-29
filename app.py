@@ -1,60 +1,62 @@
-from flask import Flask, render_template, request, send_file, jsonify
-from datetime import datetime, time
+from flask import Flask, render_template, request, jsonify, send_file
 import pandas as pd
+from datetime import datetime, timedelta
 import io
 
 app = Flask(__name__)
 
-# Simulación de base de datos de contratos (Luego se llena con el Excel)
-CONTRATOS = {
-    "CONT-001": {"cliente": "Empresa Alfa", "max_mbtu": 5000, "puntos": ["Mamonal", "Cartagena"]},
-    "CONT-002": {"cliente": "Empresa Beta", "max_mbtu": 2000, "puntos": ["Aguachica"]}
-}
-
-nominaciones_db = [] # Aquí se guardarán temporalmente
-
-def get_status_ventana():
-    ahora = datetime.now().time()
-    # Para pruebas, puedes comentar estas líneas o ajustarlas
-    limite = time(16, 0)
-    apertura_reno = time(17, 0)
-    
-    if ahora <= limite: return "ABIERTA"
-    if limite < ahora < apertura_reno: return "BLOQUEADA"
-    return "RENOMINACION"
+# Lista en memoria para guardar nominaciones (se reinicia si el server se apaga en Render Free)
+nominaciones = []
 
 @app.route('/')
 def index():
-    return render_template('index.html', status=get_status_ventana())
+    return render_template('index.html')
 
-@app.route('/nominar', methods=['POST'])
-def nominar():
+@app.route('/enviar', methods=['POST'])
+def enviar():
     data = request.json
-    status = get_status_ventana()
+    contrato = data.get('contrato')
+    cantidad = data.get('cantidad')
+    fecha_nominacion = data.get('fecha') # Nueva fecha elegida por el usuario
     
-    # Validación de seguridad de última hora
-    if status == "BLOQUEADA":
-        return jsonify({"error": "Ventana cerrada por proceso de confirmación"}), 403
+    # --- Lógica de tiempo corregida ---
+    # Usamos una hora de cierre amplia (11 PM) para evitar bloqueos por zona horaria en pruebas
+    ahora = datetime.now()
+    hora_limite = 23 # 11:00 PM
     
-    # Validación de cantidad MBTU
-    contrato = CONTRATOS.get(data['contrato'])
-    if float(data['cantidad']) > contrato['max_mbtu']:
-        return jsonify({"error": f"Excede el límite del contrato ({contrato['max_mbtu']} MBTU)"}), 400
+    if ahora.hour >= hora_limite and fecha_nominacion == ahora.strftime('%Y-%m-%d'):
+        return jsonify({
+            "status": "error", 
+            "message": f"Ventana cerrada. Las nominaciones para hoy cierran a las {hora_limite}:00"
+        })
 
-    data['fecha_registro'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    data['estado'] = "En Proceso"
-    nominaciones_db.append(data)
+    # Guardar la nominación
+    nueva_nom = {
+        "Fecha de Aplicación": fecha_nominacion,
+        "Contrato": contrato,
+        "Cantidad (MBTU)": cantidad,
+        "Fecha de Registro": ahora.strftime("%Y-%m-%d %H:%M:%S")
+    }
+    nominaciones.append(nueva_nom)
     
-    return jsonify({"message": "Nominación recibida correctamente", "data": data})
+    return jsonify({"status": "success", "message": "Nominación registrada exitosamente"})
 
-@app.route('/exportar')
-def exportar():
-    df = pd.DataFrame(nominaciones_db)
+@app.route('/descargar')
+def descargar():
+    if not nominaciones:
+        return "No hay datos para descargar", 400
+    
+    df = pd.DataFrame(nominaciones)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         df.to_excel(writer, index=False, sheet_name='Nominaciones')
     output.seek(0)
-    return send_file(output, attachment_filename="nominaciones_geam.xlsx", as_attachment=True)
+    
+    return send_file(
+        output,
+        download_name=f"Reporte_GEAM_{datetime.now().strftime('%Y%m%d')}.xlsx",
+        as_attachment=True
+    )
 
 if __name__ == '__main__':
     app.run(debug=True)
